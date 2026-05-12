@@ -1,9 +1,10 @@
 # Origin Take-Home — Referral Inbox Triage Agent
 
 A genuine agentic system for Cedar Kids Therapy's Monday inbox: an Anthropic
-`messages.create` tool-use loop per item, deterministic safety overrides,
-structured output via a `submit_triage` tool, and a regex fallback that keeps
-the system running when no API key is provisioned.
+`messages.create` tool-use loop per item, a bilingual (EN + ES) deterministic
+safeguarding pre-filter with hard-override on the LLM, structured output via
+a `submit_triage` tool, per-batch cost/cache telemetry, and a regex fallback
+that keeps the system running when no API key is provisioned.
 
 ## How to run
 
@@ -94,11 +95,15 @@ test-coverage gap I'd close next.
 
 Design properties worth flagging:
 
-- **Defense-in-depth on safety.** The deterministic safeguarding filter runs
-  every time, even on the LLM path. The match is included in the user
-  message so the model knows about it; the orchestrator also force-overrides
-  to P0 / safeguarding if the LLM disagrees. Safety is hardcoded, not
-  delegated to a probabilistic system.
+- **Defense-in-depth on safety.** The deterministic safeguarding filter
+  (`src/safety/safeguarding.ts`) runs every time, even on the LLM path,
+  and is bilingual: English + Spanish across PedHITSS clinical
+  categories (physical harm, verbal insults, threats, yelling, sexual
+  abuse) plus fear-of-caregiver, unsafe-at-home, and self-harm. The
+  matched phrase + category + language is passed to the LLM as a pre-
+  screen hint; the orchestrator also force-overrides to P0 if the LLM
+  disagrees. Safety is hardcoded, not delegated to a probabilistic
+  system.
 
 - **Structured output via a tool, not free-form JSON.** `submit_triage` is
   registered as a tool whose input schema is the target shape. The LLM
@@ -123,6 +128,12 @@ Design properties worth flagging:
   shape and write to the same trace. The LLM path is the primary; the
   deterministic path is the floor — useful for CI, for reviewers without a
   key, and as the per-item escape hatch when the LLM blows up.
+
+- **LLM telemetry.** `src/llm/telemetry.ts` captures `response.usage`
+  on every `messages.create` call. End-of-batch summary writes to a
+  `.telemetry.json` sidecar and prints to stderr: per-item tokens,
+  turns, wall-clock, and cache hit ratio. Reviewers can see the cost
+  and latency profile without re-running.
 
 ## Failure modes and production eval
 
@@ -151,15 +162,23 @@ The decisions that should worry a reviewer:
    an authoritative payer table, not carry its own list, and "in-network
    vs. OON" should be billing's rubric, not the agent's.
 
-5. **Language detection & non-English safety.** Spanish detection is
-   token-based; safeguarding patterns are English-only. Production:
-   short-text language ID + Spanish-language safeguarding patterns reviewed
-   by a bilingual clinician.
+5. **Language detection & non-English safety.** Safeguarding patterns
+   cover English AND Spanish across the PedHITSS clinical categories
+   (physical harm, insults, threats, yelling, sexual abuse) plus fear of
+   caregiver, unsafe-at-home, and self-harm. The gap that remains is
+   other languages (Mandarin, Vietnamese, dialectal Spanish variants) and
+   clinician-reviewed validation of the Spanish phrase set. Production:
+   short-text language ID + per-language gold sets reviewed by bilingual
+   clinicians.
 
-6. **Cost & latency.** Each item is ~5-12 model turns. With prompt caching
-   the dominant cost is the tool-result tokens. Production should track
-   tokens-per-item, cache hit rate, p95 latency, and have a circuit breaker
-   that flips to the deterministic path under load or outage.
+6. **Cost & latency.** Per-item is 2–5 model turns in practice (telemetry
+   on the visible 8-item inbox; emitted to stderr and written to a
+   `.telemetry.json` sidecar). With prompt caching on the system +
+   tool-definitions prefix, the dominant cost is the tool-result tokens
+   and the per-item user message; observed cache-hit ratio is ~80–85% on
+   warm batches. Production should track tokens-per-item, cache hit rate,
+   p95 latency, and have a circuit breaker that flips to the
+   deterministic path under load or outage.
 
 ## What I chose not to build, and why
 
