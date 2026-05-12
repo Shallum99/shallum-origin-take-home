@@ -2,6 +2,10 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { MAX_TOOL_ITERATIONS, MODEL } from "./client.js";
 import { buildUserMessage, SYSTEM_PROMPT } from "./prompts.js";
+import {
+  appendPerItemTrace,
+  startItem as startTelemetryItem,
+} from "./telemetry.js";
 import { parseSubmitTriage, TOOL_REGISTRY, TOOL_SPECS } from "./tools.js";
 import type { SubmitTriagePayload } from "./schemas.js";
 import type { InboxItem } from "../types.js";
@@ -37,6 +41,8 @@ export async function runItemAgent(
     { role: "user", content: buildUserMessage(item, safeguarding, dueDates) },
   ];
 
+  const telemetry = startTelemetryItem(item.id, MODEL);
+
   let finalAnswer: SubmitTriagePayload | null = null;
 
   for (let iter = 0; iter < MAX_TOOL_ITERATIONS && !finalAnswer; iter++) {
@@ -56,6 +62,14 @@ export async function runItemAgent(
           : tool,
       ),
       messages,
+    });
+
+    telemetry.recordCall({
+      input_tokens: response.usage.input_tokens ?? 0,
+      output_tokens: response.usage.output_tokens ?? 0,
+      cache_creation_input_tokens:
+        response.usage.cache_creation_input_tokens ?? 0,
+      cache_read_input_tokens: response.usage.cache_read_input_tokens ?? 0,
     });
 
     messages.push({ role: "assistant", content: response.content });
@@ -142,6 +156,11 @@ export async function runItemAgent(
 
     messages.push({ role: "user", content: toolResults });
   }
+
+  // Finalize telemetry whether or not we produced an answer — failed runs
+  // are exactly the cases where telemetry is most useful.
+  const record = telemetry.finish();
+  appendPerItemTrace(record);
 
   if (!finalAnswer) {
     throw new Error(

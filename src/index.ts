@@ -1,6 +1,13 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { runAgent } from "./agent.js";
+import { MODEL } from "./llm/client.js";
+import {
+  buildBatchSummary,
+  configureTelemetry,
+  printBatchSummary,
+  writeTelemetrySummary,
+} from "./llm/telemetry.js";
 import { buildBatchOutput, configureTrace } from "./tools.js";
 import type { InboxItem } from "./types.js";
 
@@ -13,6 +20,8 @@ interface CliArgs {
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   configureTrace({ path: args.trace });
+  // Telemetry sits next to the trace; same directory, ".telemetry.json" suffix.
+  configureTelemetry(args.trace.replace(/\.jsonl?$/, "") + ".telemetry.json");
 
   const inbox = JSON.parse(
     readFileSync(resolve(process.cwd(), args.input), "utf8"),
@@ -23,6 +32,15 @@ async function main(): Promise<void> {
   const outputPath = resolve(process.cwd(), args.output);
   mkdirSync(dirname(outputPath), { recursive: true });
   writeFileSync(outputPath, `${JSON.stringify(output, null, 2)}\n`);
+
+  // Emit LLM telemetry to stderr + a sidecar JSON so reviewers can see
+  // cost/cache/latency without re-running. No-ops if no LLM calls happened
+  // (deterministic path, or empty inbox).
+  if (process.env.ANTHROPIC_API_KEY) {
+    const summary = buildBatchSummary(MODEL);
+    writeTelemetrySummary(summary);
+    printBatchSummary(summary);
+  }
 }
 
 function parseCliArgs(argv: string[]): CliArgs {
