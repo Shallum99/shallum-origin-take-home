@@ -14,7 +14,10 @@ export function getAnthropicClient(): Anthropic | null {
   return cachedClient;
 }
 
+// Default to the strongest current Claude model. Triage is a high-judgment
+// task and the per-item token cost is bounded; we'd rather pay for accuracy
+// here than save on a smaller model.
 export const MODEL =
-  process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+  process.env.ANTHROPIC_MODEL || "claude-opus-4-7";
 
 export const MAX_TOOL_ITERATIONS = 12;

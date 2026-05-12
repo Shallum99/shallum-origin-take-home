@@ -11,7 +11,7 @@ the system running when no API key is provisioned.
 npm install
 # (optional) put your key in a .env file:
 #   ANTHROPIC_API_KEY=sk-ant-...
-#   ANTHROPIC_MODEL=claude-sonnet-4-6   # default
+#   ANTHROPIC_MODEL=claude-opus-4-7   # default; any Claude model works
 npm run triage   -- --input data/inbox.json --output output.json --trace .trace/tool-calls.jsonl
 npm run validate -- --input data/inbox.json --output output.json --trace .trace/tool-calls.jsonl
 npm test          # vitest: deterministic-path invariants + safeguarding gold set
@@ -20,11 +20,21 @@ npm run typecheck
 
 Both `triage` and `validate` accept no flags and default to the same paths.
 
-- **With a key set**, the agent runs Claude in a tool-use loop per item; items
-  run in bounded parallel (`AGENT_CONCURRENCY=3` by default). End-to-end on
-  the 8-item inbox takes ~30–45s.
-- **Without a key**, the orchestrator silently falls back to a deterministic
-  pipeline. Same contract, same validator-passing output, no LLM cost.
+### Runtime
+
+- **LLM path (default — Opus 4.7)**: ~60–70 seconds end-to-end on the 8-item
+  inbox (concurrency=3). Per-item ~5–10s including 2–6 tool turns. Well
+  within the brief's "few minutes or less" envelope. Override the model via
+  `ANTHROPIC_MODEL` if you want to trade quality for latency
+  (`claude-sonnet-4-6` ~30–45s, `claude-haiku-4-5-20251001` faster still).
+- **Deterministic fallback (no key)**: sub-second, ~200ms.
+- **Tests (`npm test`)**: ~200ms — they force the deterministic path so CI
+  never burns LLM tokens.
+
+If you fork this and find Opus 4.7 latency unacceptable for your reviewer
+flow, set `ANTHROPIC_MODEL=claude-haiku-4-5-20251001` in `.env` — every
+test invariant still passes (the system prompt enforces the rules, not the
+model size).
 
 ## Stack and runtime
 
