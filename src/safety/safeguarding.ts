@@ -28,6 +28,12 @@ const PATTERNS: RegExp[] = [
   /\b(getting|been|gets|got|is|was)\s+rough\b/i,
   /\brough\s+with\s+(him|her|them|the\s+(child|kid|baby|boy|girl))\b/i,
   /\b(hit|hits|hitting|hurt|hurts|hurting)\s+(him|her|me|the\s+(child|kid|baby|boy|girl))\b/i,
+  // Passive: "(been|getting|being) hit/hurt/beat" — catches "has been getting hit at home"
+  /\b(getting|gets|got|been|being|is\s+being)\s+(hit|hurt|beat(?:en)?|slapped|punched|kicked|smacked|spanked)\b/i,
+  // Active by caregiver subject: "<caregiver> (hits|hurts|beats) ..."
+  /\b(dad|daddy|mom|mommy|father|mother|stepfather|stepmother|grandpa|grandma)\s+(hits?|hurts?|beats?|slaps?|punches?|kicks?|yells?\s+at)\b/i,
+  // "X (hits|hurts|beats) the child/her/him/etc"
+  /\b(beat|beats|beaten|beating)\s+(him|her|me|the\s+(child|kid|baby|boy|girl))\b/i,
   /\b(afraid|scared|terrified|frightened)\s+of\s+(?:(?:his|her|their|the)\s+)?(dad|mom|mommy|daddy|stepfather|stepmother|father|mother|him|her)\b/i,
   /\b(unsafe|not\s+safe|isn'?t\s+safe|wasn'?t\s+safe|aren'?t\s+safe)\s+(at\s+home|in\s+the\s+home|home)\b/i,
   /\b(self[\s-]?harm|self[\s-]?harming|suicid(e|al))\b/i,

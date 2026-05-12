@@ -40,6 +40,21 @@ const POSITIVES: Array<{ name: string; text: string }> = [
     name: "scared of stepfather",
     text: "Lately he says he's scared of his stepfather.",
   },
+  // Regressions: passive constructions found by Boris-review edge testing.
+  // Earlier versions missed these because the active patterns required a
+  // direct object like "hit him" / "hit the kid".
+  {
+    name: "passive 'getting hit at home'",
+    text: "Also my child has been getting hit at home but it's fine.",
+  },
+  {
+    name: "passive 'being beat'",
+    text: "He's been being beat by his stepfather for months.",
+  },
+  {
+    name: "caregiver-subject 'dad hits'",
+    text: "Dad hits the boys when he drinks.",
+  },
 ];
 
 const NEGATIVES: Array<{ name: string; text: string }> = [
