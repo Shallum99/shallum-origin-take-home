@@ -1,235 +1,197 @@
-# Origin AI Engineering Take-Home: Referral Inbox Triage Agent
+# Origin Take-Home — Referral Inbox Triage Agent
 
-This is my submission for the Cedar Kids Therapy Monday inbox triage prototype.
-The agent reads `data/inbox.json`, runs a deterministic pipeline per item, calls
-the provided tools to build an audit trail, and emits a human-reviewable
-`output.json` that passes `npm run validate`.
+A genuine agentic system for Cedar Kids Therapy's Monday inbox: an Anthropic
+`messages.create` tool-use loop per item, deterministic safety overrides,
+structured output via a `submit_triage` tool, and a regex fallback that keeps
+the system running when no API key is provisioned.
 
 ## How to run
 
 ```bash
 npm install
+# (optional) put your key in a .env file:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   ANTHROPIC_MODEL=claude-sonnet-4-6   # default
 npm run triage   -- --input data/inbox.json --output output.json --trace .trace/tool-calls.jsonl
 npm run validate -- --input data/inbox.json --output output.json --trace .trace/tool-calls.jsonl
+npm test          # vitest: deterministic-path invariants + safeguarding gold set
+npm run typecheck
 ```
 
-Both commands also work with no flags and default to the same paths. No API
-key is required — the agent is rules-based at runtime (see below for why).
-End-to-end on the 8-item inbox runs in well under a second.
+Both `triage` and `validate` accept no flags and default to the same paths.
 
-`npm run typecheck` is also available.
+- **With a key set**, the agent runs Claude in a tool-use loop per item; items
+  run in bounded parallel (`AGENT_CONCURRENCY=3` by default). End-to-end on
+  the 8-item inbox takes ~30–45s.
+- **Without a key**, the orchestrator silently falls back to a deterministic
+  pipeline. Same contract, same validator-passing output, no LLM cost.
 
 ## Stack and runtime
 
-- TypeScript on Node LTS, executed via `tsx`. No transpile step.
-- Existing dependencies only: `ajv` / `ajv-formats` (validator), `ulid`
-  (deterministic-ish IDs in the trace tooling), `tsx` (runner).
-- No runtime LLM call. The provided synthetic items are structured enough that
-  regex-based extraction is reliable, faster, and reproducible across runs.
-  Reviewers without an API key get identical output. The "what I would do with
-  another 4 hours" section discusses where I would reintroduce an LLM.
+- TypeScript on Node LTS, executed via `tsx`.
+- `@anthropic-ai/sdk` for the agentic loop. Prompt caching on the system
+  prompt and tool definitions (the 5-minute ephemeral cache).
+- `zod` for runtime validation of every tool input and of the final
+  `submit_triage` payload — failed parses are fed back as `tool_result`s so
+  the LLM can self-correct rather than crashing the batch.
+- `p-limit` for bounded item-level concurrency.
+- `dotenv` for local `.env` loading.
+- `vitest` for the deterministic-path invariants and the safeguarding
+  gold-set (no LLM cost in CI).
 
 ## Architecture
 
-Per-item pipeline, end to end inside one `withItemContext(item.id, ...)`:
-
 ```
-inbox item
-   │
-   ▼
-extract.ts ──── intake fields + signals (safeguarding, language, same-day,
-   │            clinical-question-only, missing-paperwork, contact channels)
-   ▼
-triage.ts ──── classification + urgency from signals.
-   │            Safety-first ordering: safeguarding > same-day cancel >
-   │            clinical question > missing paperwork > new_referral.
-   ▼
-handlers.ts ─── one handler per classification. Calls tools, branches on
-   │            tool results (e.g. in-network vs. OON vs. expired), drafts
-   │            a message, creates a task, optionally escalates.
-   ▼
-agent.ts ───── assembles ItemOutput, attaches `tools_called` straight from
-                getToolCallsForItem(item.id), hardcodes requires_human_review.
+                          inbox item
+                              │
+                              ▼
+                ┌─ safety/safeguarding.ts ─┐   deterministic regex pre-filter,
+                │   runs unconditionally   │   always. Provides a hint to the LLM
+                └────────┬─────────────────┘   AND overrides the LLM if it
+                         │                     refuses to escalate a match.
+                         ▼
+              ┌──────── orchestrator ────────┐
+              │      src/agent.ts            │
+              │  if (ANTHROPIC_API_KEY) →    │
+              │      llm/loop.ts             │
+              │  else →                      │
+              │      deterministic/*.ts      │
+              └──────┬───────────┬───────────┘
+                     │           │
+       LLM PATH      ▼           ▼     DETERMINISTIC PATH
+  ┌──────────────────┐         ┌────────────────────────┐
+  │ messages.create  │         │ extract.ts (regex)     │
+  │  + tools + cache │         │ triage.ts (signals)    │
+  │ tool_use loop:   │         │ handlers.ts (per-class │
+  │   search_patient │         │   tool orchestration)  │
+  │   verify_insur.  │         │ drafts.ts (templates)  │
+  │   lookup_policy  │         └────────────────────────┘
+  │   find_slots     │
+  │   hold_slot      │
+  │   create_task    │       (both paths call the same
+  │   draft_message  │        tools.ts; never modify it,
+  │   escalate       │        never bypass the audit
+  │   submit_triage  │        trace)
+  └──────────────────┘
+                     │
+                     ▼
+       withItemContext(item.id, ...)
+       tools_called ← getToolCallsForItem(item.id)
+       requires_human_review = true (hardcoded policy)
+       output.json (BatchOutput, validator-passing)
 ```
 
-The design decisions worth flagging:
+Design properties worth flagging:
 
-- **Signal-based dispatcher, not item-id switches.** The README warns that
-  similar synthetic variants will be run during review. `triage()` branches
-  on detected signals (safeguarding keyword set, Spanish token frequency,
-  same-day language, `[blank]` counts, payer recognition) so it generalizes
-  beyond the 8 visible items.
+- **Defense-in-depth on safety.** The deterministic safeguarding filter runs
+  every time, even on the LLM path. The match is included in the user
+  message so the model knows about it; the orchestrator also force-overrides
+  to P0 / safeguarding if the LLM disagrees. Safety is hardcoded, not
+  delegated to a probabilistic system.
 
-- **Safety-first ordering.** `triage()` checks the safeguarding signal first
-  before any other classification — including before scheduling intent.
-  Item_2 reads on its surface as a same-day evaluation request, but the
-  caregiving disclosure dominates and routes to P0 / clinical lead with a
-  neutral draft. The matched phrase is included verbatim in the escalation
-  `reason` so the clinical lead can audit *why* the agent escalated.
+- **Structured output via a tool, not free-form JSON.** `submit_triage` is
+  registered as a tool whose input schema is the target shape. The LLM
+  cannot "spill" the final answer into prose, and we get the same Zod
+  validation as we apply to every other tool. Failed parses produce a
+  `tool_result` with the validation error so Claude can self-correct.
 
-- **`requires_human_review: true` is a hardcoded policy.** Every output is
-  advisory. The agent never auto-sends, never schedules, never holds
-  anything as "approved." This is a property of the prototype, not a
-  computed flag, so I set it in `agent.ts` as a literal.
+- **Prompt caching on the stable prefix.** System prompt (with the verbatim
+  policy document inlined) and tool definitions are cached. Per-item cost
+  is dominated by the conversation turns, not the static prefix.
 
-- **Tool orchestration follows the policy hierarchy in `data/policies.md`.**
-  In particular, the in-network branch does `find_slots` + `hold_slot`, but
-  the out-of-network and expired branches deliberately do not — per policy,
-  any benefits conversation must precede a slot hold. The expired branch
-  also surfaces the billing-system-supersedes-referral discrepancy in the
-  rationale (item_3-style cases).
+- **No hand-built audit entries.** Every tool the LLM uses runs through
+  `tools.ts`, every entry in `tools_called[]` comes from
+  `getToolCallsForItem(item.id)`. The audit trail is the source of truth.
 
-- **`tools_called` is never hand-built.** Each handler issues real tool
-  calls inside `withItemContext`, and the final array comes straight from
-  `getToolCallsForItem(item.id)`. This keeps the trace-match validator
-  happy and means I cannot accidentally drift the audit story from what
-  actually happened.
+- **Per-item agentic loop, bounded.** Up to 12 tool-use iterations per item.
+  If the model end_turn's without `submit_triage`, we ask it explicitly. If
+  iterations exhaust, the item falls back to the deterministic path
+  (resilience over partial output).
 
-- **Existing-patient handling.** Item_4 (Mateo Ramirez) hits `search_patient`
-  and finds an existing chart whose guardian-on-file (Sofia Ramirez) does
-  not match the sender (Carla Mendez). The handler surfaces this guardian
-  mismatch in the decision rationale and the intake task. I left the
-  classification as `new_referral` rather than `existing_patient_request`
-  because a pediatrician sent a fresh referral document — the chart match
-  is information for the front-desk callback, not a change in the request
-  type. Reasonable people could split this differently; I called it once
-  and was consistent.
+- **Two paths, one contract.** Both paths produce the same `ItemOutput`
+  shape and write to the same trace. The LLM path is the primary; the
+  deterministic path is the floor — useful for CI, for reviewers without a
+  key, and as the per-item escape hatch when the LLM blows up.
 
 ## Failure modes and production eval
 
-The triage decisions reviewers should worry about most:
+The decisions that should worry a reviewer:
 
-1. **Missed safeguarding (false negative).** The cost asymmetry here is
-   enormous: an over-escalation wastes a clinical lead's time; a missed
-   escalation can mean failing a child. My regex set covers the obvious
-   English phrases (`abuse`, `neglect`, `rough with`, `unsafe at home`,
-   `afraid of dad`, etc.) but it will miss euphemisms, oblique disclosures,
-   and any Spanish-language safeguarding cue. In production this should be
-   an LLM classifier with calibrated thresholds, plus a human-in-the-loop
-   review every time the agent decides *not* to escalate a safeguarding-
-   adjacent item, with eval driven by:
-   - a clinician-labeled gold set of safeguarding cases (including hard
-     negatives — clingy, sad, behavioural without unsafe caregiving)
-   - precision/recall reported per language and per channel
-   - explicit tracking of false-negative rate; that is the metric that
-     decides whether the system ships
+1. **Missed safeguarding (false negative).** Highest-stakes failure mode. The
+   regex catches the obvious English phrases; the LLM catches the rest
+   *most* of the time. Production should ship a clinician-labeled gold set
+   and report per-language precision/recall, with explicit tracking of
+   false-negative rate. Both layers (regex + LLM) are independent; the
+   override is the belt-and-braces.
 
-2. **Brittle extraction.** Regex extraction is hostage to format drift —
-   adding a new payer, a new fax template, or a new voicemail transcription
-   provider can silently degrade quality. In production: LLM-assisted
-   extraction with the regex layer kept as a deterministic fallback and an
-   eval set of `(message, expected_intake)` pairs.
+2. **LLM tool-use drift.** The model occasionally puts the wrong value in a
+   structured field (we caught `draft_id` going into `draft_reply` during
+   development). Mitigation today: Zod validation with self-correction loop.
+   In production: LLM-as-judge on the final payload against a structured
+   rubric, plus offline regression tests against held-out items.
 
-3. **Payer / coverage drift.** `verify_insurance` is mocked but in
-   production the in-network set drifts as contracts change. The agent
-   should consult an authoritative payer table rather than carrying its
-   own list, and the rubric for "in-network vs. OON" should live in
-   billing, not in the agent.
+3. **Over-escalation.** The brief flags this. Default urgency is P2 in both
+   paths; safeguarding override is the only force-promote. Production eval
+   should track per-classification escalation rates, especially for
+   clinical-question and missing-paperwork items.
 
-4. **Over-escalation.** The brief calls this out explicitly. My triage rule
-   biases toward P0 only when the safeguarding regex hits, and defaults to
-   P2 otherwise — but a richer eval should track over-escalation rate by
-   classification, especially for clinical-question and missing-paperwork
-   cases that are tempting to flag P1.
+4. **Payer / coverage drift.** `verify_insurance` is mocked; in production
+   the in-network set drifts as contracts change. The agent should consult
+   an authoritative payer table, not carry its own list, and "in-network
+   vs. OON" should be billing's rubric, not the agent's.
 
-5. **Language detection precision.** I detect Spanish from a token count;
-   that works on the synthetic dataset but is too coarse for real use. A
-   short-text language identifier would be the production pick, and the
-   draft templates would route through the same translation layer.
+5. **Language detection & non-English safety.** Spanish detection is
+   token-based; safeguarding patterns are English-only. Production:
+   short-text language ID + Spanish-language safeguarding patterns reviewed
+   by a bilingual clinician.
 
-6. **Draft tone drift.** Templated drafts are predictable but easy to
-   identify as templates. The production version should use an LLM with a
-   strict system prompt forbidding clinical advice and forbidding any
-   statement that implies a message was sent, plus an automated
-   LLM-as-judge eval against a clinician-reviewed rubric.
+6. **Cost & latency.** Each item is ~5-12 model turns. With prompt caching
+   the dominant cost is the tool-result tokens. Production should track
+   tokens-per-item, cache hit rate, p95 latency, and have a circuit breaker
+   that flips to the deterministic path under load or outage.
 
 ## What I chose not to build, and why
 
-- **No runtime LLM call.** I scoped this prototype to deterministic
-  extraction because (a) the synthetic dataset is structured, (b) reviewers
-  may not provision a key, and (c) reproducibility matters more than
-  surface-level "wow" for a triage layer. The architecture leaves the door
-  open: replacing `extract.ts` with an LLM-backed extractor is a localized
-  change.
-
-- **No multi-discipline triage on a single referral.** Real referrals can
-  ask for SLP+OT or OT+PT; I capture multiple disciplines if multiple
-  keyword sets hit, but I don't split into multiple intake tracks or hold
-  one slot per discipline. The hold-slot logic uses the first parsed
-  discipline. In production this would split into per-discipline subtasks.
-
-- **No retry / backoff around tool calls.** The mock tools never fail, so
-  I haven't wired retries. The trace's `audit_exempt: "retry"` field hints
-  at what a real implementation would look like — record exempt entries
-  for failed attempts, surface only the successful call in the output.
-
-- **No richer existing-patient diff.** I surface the guardian-name mismatch
-  in item_4 because it materially changes the front-desk workflow, but I
-  don't reconcile a richer diff (e.g. payer-on-file vs. payer-on-referral).
-  Production would inspect the chart deeper.
-
-- **No mandated-reporter pathway.** Per policy I escalate safeguarding to
-  the clinical lead and let them decide. A real practice has a documented
-  mandated-reporter workflow with timestamps, who-reported-to-whom, and
-  an attached form. That belongs behind the `escalate` tool, not in the
-  agent.
-
-- **No multi-language coverage beyond Spanish.** Detection thresholds are
-  English-vs-Spanish only.
+- **No multi-discipline branching on a single referral.** Real referrals can
+  request SLP+OT; this prototype takes the first parsed discipline. Per-
+  discipline subtasks belong in a v2.
+- **No retry / backoff around tool calls.** Mock tools never fail. The trace
+  format already has `audit_exempt: "retry"` for this; wiring it up is
+  cosmetic without a flaky downstream to test against.
+- **No mandated-reporter workflow.** Per policy I escalate to clinical_lead
+  and stop. A real practice has a documented reporter pathway with
+  timestamps and a form; that belongs behind `escalate`, not in the agent.
+- **No richer chart-diff on existing patients.** I surface the guardian-name
+  mismatch on item_4 because it materially changes the front-desk workflow,
+  but I don't reconcile payer-on-file vs. payer-on-referral.
+- **No streaming.** The agent uses non-streamed `messages.create`. For an
+  interactive surface streaming matters; for batch triage it doesn't.
 
 ## What I would do with another 4 hours
 
-1. **LLM-backed extraction with regex fallback.** Same I/O contract as
-   `extract.ts` today, but the LLM call fills `ExtractedIntake` directly
-   from the inbox body, with strict JSON-schema-shaped output. Run it
-   against the existing 8 items as a smoke test, then add a labeled gold
-   set and compute per-field accuracy.
-
-2. **LLM-backed draft generation.** Keep the current templates as the
-   fallback (no key required), but swap to an LLM for the actual body
-   when a key is present, gated by a strict system prompt:
-   "no clinical advice; do not state the message has been sent; respect
-   the requested language." Add a deterministic LLM-as-judge check that
-   rejects any draft mentioning a specific diagnosis, treatment, or
-   guarantee.
-
-3. **Eval harness.** A `test/triage.spec.ts` that runs `runAgent` against
-   `data/inbox.json` and asserts per-item classification, urgency, and
-   the presence of specific tool calls. Add a small "hard variants" set
-   that perturbs the visible items (renamed payers, single-word names,
-   safeguarding disguised in normal language) so the regression surface
-   matches what reviewer variants would actually look like.
-
-4. **Per-classification metrics in the output summary.** Today the summary
-   reports `p0_count`, `p1_count`, and `requires_human_review_count`. I'd
-   add `per_classification`, `tool_call_density`, and time-to-decision so
-   ops can spot drift batch-over-batch.
-
-5. **Tighter retry & idempotency.** Wire `audit_exempt: "retry"` for any
-   tool that throws, record it on the trace, and re-attempt with a small
-   bounded loop so a flaky downstream doesn't break a whole batch.
-
-6. **A simple inbox CLI.** A `--explain item_3` flag that prints the
-   matched signals, the chosen branch, and the tool-call trace for a
-   single item — much faster to iterate than re-reading `output.json`
-   from a full batch run.
+1. **LLM-as-judge eval harness.** Score every item's `decision_rationale`,
+   `draft_reply`, and tool-call set against a clinician-reviewed rubric.
+   Track regression as the system evolves.
+2. **Snapshot tests against a captured LLM run.** Record one LLM batch as
+   the golden output; replay-style asserts on per-item invariants without
+   spending tokens on every CI run.
+3. **A `--explain item_3` CLI flag.** Print the matched signals, the tool
+   trace, the system prompt prefix, and the final payload for one item.
+   Much faster than re-reading `output.json` end to end.
+4. **Wire `audit_exempt: "retry"`** around the LLM call itself, recording
+   failed turns to the trace but not surfacing them in `tools_called`.
+5. **Spanish safeguarding patterns**, plus a small bilingual gold set, so
+   the deterministic safety floor isn't English-only.
+6. **Cost telemetry**: log `usage.cache_creation_input_tokens` and
+   `usage.cache_read_input_tokens` per item; emit a per-batch summary.
 
 ---
 
 ## Original brief (preserved)
 
-> Origin builds software for pediatric therapy practices. In this assignment,
-> you are helping a fictional practice, Cedar Kids Therapy, triage its Monday
-> inbox.
-
-### Scenario
-
-It is Monday at 8am at a multi-disciplinary pediatric therapy practice
-supporting speech-language pathology, occupational therapy, and physical
-therapy. The shared inbox accumulated items over the weekend from pediatrician
-fax referrals, parent voicemails, parent portal messages, and emails. Build an
-AI agent prototype that turns the messy batch into a sorted, human-reviewable
-action plan.
+> Origin builds software for pediatric therapy practices. In this
+> assignment, you are helping a fictional practice, Cedar Kids Therapy,
+> triage its Monday inbox.
 
 ### Urgency calibration
 
@@ -238,22 +200,18 @@ action plan.
 - `P2`: normal intake, scheduling, billing, or clinical-review workflow.
 - `P3`: low-priority admin, FYI, spam.
 
-Default to `P2` unless there is a clear safety or same-day operational reason. Over-escalation is itself a production failure mode.
-
-### Constraints (respected by this submission)
+### Constraints respected by this submission
 
 - TypeScript / Node LTS / npm.
-- Provided tools in `src/tools.ts` used as-is — not modified, not bypassed.
-- More than 3 distinct tools used across the batch (`search_patient`,
-  `verify_insurance`, `lookup_policy`, `find_slots`, `hold_slot`,
-  `create_task`, `draft_message`, `escalate`).
+- `src/tools.ts` used as-is — never modified, never bypassed.
+- More than 3 distinct tools used across the batch.
 - All item-level tool calls wrapped in `withItemContext(item.id, ...)`.
-- `tools_called[]` populated by `getToolCallsForItem(item.id)` — passed
+- `tools_called[]` built from `getToolCallsForItem(item.id)`, passed
   through unchanged.
-- Final batch output assembled via `buildBatchOutput(items)`.
+- Batch output assembled via `buildBatchOutput(items)`.
 - No auto-send; `draft_message` only.
 - No scheduling; `find_slots` / `hold_slot` only as reviewable suggestions.
-- Only synthetic data; no real PHI; API keys never committed.
+- API key kept in `.env` (gitignored); only synthetic data; no real PHI.
 
 ### Rubric (reviewer-facing)
 

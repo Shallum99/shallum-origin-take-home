@@ -1,4 +1,4 @@
-import type { Classification, Urgency } from "./types.js";
+import type { Classification, Urgency } from "../types.js";
 import type { ExtractionResult } from "./extract.js";
 
 export interface TriageDecision {

@@ -1,4 +1,5 @@
-import type { Discipline, ExtractedIntake, InboxItem } from "./types.js";
+import type { Discipline, ExtractedIntake, InboxItem } from "../types.js";
+import { detectSafeguarding } from "../safety/safeguarding.js";
 
 export interface ItemSignals {
   safeguarding: { hit: boolean; matchedPhrase: string | null };
@@ -17,21 +18,6 @@ export interface ExtractionResult {
   signals: ItemSignals;
   missingInfo: string[];
 }
-
-const STRONG_SAFEGUARDING_PATTERNS: RegExp[] = [
-  /\babus(e|ive|ing|ed)\b/i,
-  /\bneglect(ed|ing|ful)?\b/i,
-  /\bmolest(ed|ing)?\b/i,
-  /\b(getting|been|gets|got|is|was)\s+rough\b/i,
-  /\brough\s+with\s+(him|her|them|the\s+(child|kid|baby|boy|girl))\b/i,
-  /\bhits?\s+(him|her|me|the\s+(child|kid|baby|boy|girl))\b/i,
-  /\bhitting\s+(him|her|me|the\s+(child|kid|baby|boy|girl))\b/i,
-  /\bhurts?\s+(him|her|me|the\s+(child|kid|baby|boy|girl))\b/i,
-  /\bafraid\s+of\s+(dad|mom|mommy|daddy|stepfather|stepmother|him|her)\b/i,
-  /\bscared\s+of\s+(dad|mom|mommy|daddy|stepfather|stepmother)\b/i,
-  /\bunsafe\s+(at\s+home|in\s+the\s+home|home)\b/i,
-  /\b(self[\s-]?harm|self[\s-]?harming|suicid(e|al))\b/i,
-];
 
 const SPANISH_TOKENS = [
   "hola",
@@ -138,19 +124,6 @@ export function extractIntake(item: InboxItem): ExtractionResult {
   };
 
   return { intake, signals, missingInfo };
-}
-
-function detectSafeguarding(text: string): {
-  hit: boolean;
-  matchedPhrase: string | null;
-} {
-  for (const pattern of STRONG_SAFEGUARDING_PATTERNS) {
-    const match = text.match(pattern);
-    if (match) {
-      return { hit: true, matchedPhrase: match[0] };
-    }
-  }
-  return { hit: false, matchedPhrase: null };
 }
 
 function detectLanguage(lowerText: string): "en" | "es" {
