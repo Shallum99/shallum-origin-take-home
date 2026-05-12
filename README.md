@@ -14,11 +14,12 @@ npm install
 #   ANTHROPIC_MODEL=claude-opus-4-7   # default; any Claude model works
 npm run triage   -- --input data/inbox.json --output output.json --trace .trace/tool-calls.jsonl
 npm run validate -- --input data/inbox.json --output output.json --trace .trace/tool-calls.jsonl
-npm test          # vitest: deterministic-path invariants + safeguarding gold set
 npm run typecheck
 ```
 
 Both `triage` and `validate` accept no flags and default to the same paths.
+`npm run validate` is the brief's required check; running it after `triage`
+asserts schema correctness and trace alignment.
 
 ### Runtime
 
@@ -27,14 +28,11 @@ Both `triage` and `validate` accept no flags and default to the same paths.
   within the brief's "few minutes or less" envelope. Override the model via
   `ANTHROPIC_MODEL` if you want to trade quality for latency
   (`claude-sonnet-4-6` ~30–45s, `claude-haiku-4-5-20251001` faster still).
-- **Deterministic fallback (no key)**: sub-second, ~200ms.
-- **Tests (`npm test`)**: ~200ms — they force the deterministic path so CI
-  never burns LLM tokens.
-
-If you fork this and find Opus 4.7 latency unacceptable for your reviewer
-flow, set `ANTHROPIC_MODEL=claude-haiku-4-5-20251001` in `.env` — every
-test invariant still passes (the system prompt enforces the rules, not the
-model size).
+- **Deterministic fallback (no key)**: sub-second.
+- **LLM telemetry** is emitted to stderr at end of run and written to
+  `.trace/tool-calls.telemetry.json` (cache hit ratio, per-item tokens,
+  per-item turns + wall-clock). Typical cache hit ratio on a warm batch
+  is ~80–85%.
 
 ## Stack and runtime
 
@@ -46,8 +44,11 @@ model size).
   the LLM can self-correct rather than crashing the batch.
 - `p-limit` for bounded item-level concurrency.
 - `dotenv` for local `.env` loading.
-- `vitest` for the deterministic-path invariants and the safeguarding
-  gold-set (no LLM cost in CI).
+
+The brief's required test is `npm run validate` (provided Ajv-based
+schema + trace alignment validator). No additional test framework
+beyond that — see "What I would do with another 4 hours" for the
+test-coverage gap I'd close next.
 
 ## Architecture
 
@@ -179,21 +180,28 @@ The decisions that should worry a reviewer:
 
 ## What I would do with another 4 hours
 
-1. **LLM-as-judge eval harness.** Score every item's `decision_rationale`,
-   `draft_reply`, and tool-call set against a clinician-reviewed rubric.
-   Track regression as the system evolves.
-2. **Snapshot tests against a captured LLM run.** Record one LLM batch as
-   the golden output; replay-style asserts on per-item invariants without
-   spending tokens on every CI run.
-3. **A `--explain item_3` CLI flag.** Print the matched signals, the tool
+1. **Vitest test suite + safeguarding gold set.** The brief only requires
+   `npm run validate`, so I kept test scope at zero. A real submission
+   would ship: (a) a labelled gold set for the safeguarding pre-filter
+   with positives + hard negatives in EN/ES per PedHITSS category, and
+   (b) per-item triage invariants (e.g. "item_3 OON Kaiser never calls
+   hold_slot") run against the deterministic fallback so CI never spends
+   LLM tokens. I built this during development and stripped it before
+   submission to honour the brief's scope.
+2. **LLM-as-judge eval harness.** Score every item's `decision_rationale`,
+   `draft_reply`, and tool-call set against a clinician-reviewed rubric
+   using Claude as the judge. Track regression batch-over-batch.
+3. **Snapshot tests against a captured LLM run.** Record one LLM batch
+   as the golden output; replay-style asserts on per-item invariants
+   without spending tokens on every CI run.
+4. **A `--explain item_3` CLI flag.** Print the matched signals, the tool
    trace, the system prompt prefix, and the final payload for one item.
    Much faster than re-reading `output.json` end to end.
-4. **Wire `audit_exempt: "retry"`** around the LLM call itself, recording
-   failed turns to the trace but not surfacing them in `tools_called`.
-5. **Spanish safeguarding patterns**, plus a small bilingual gold set, so
-   the deterministic safety floor isn't English-only.
-6. **Cost telemetry**: log `usage.cache_creation_input_tokens` and
-   `usage.cache_read_input_tokens` per item; emit a per-batch summary.
+5. **Retry with exponential backoff** on transient API errors (429 /
+   5xx / network). Currently any LLM error falls back immediately to the
+   deterministic path; a retry budget would shrink the fallback surface.
+6. **Generate JSON schemas from Zod** via `z.toJSONSchema()` — kill the
+   ~150 lines of duplicated tool input schemas in `src/llm/tools.ts`.
 
 ---
 
