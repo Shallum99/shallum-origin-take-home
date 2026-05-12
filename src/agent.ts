@@ -5,7 +5,7 @@ import { handle as deterministicHandle } from "./deterministic/handlers.js";
 import { triage as deterministicTriage } from "./deterministic/triage.js";
 import { getAnthropicClient } from "./llm/client.js";
 import { runItemAgent } from "./llm/loop.js";
-import { detectSafeguarding } from "./safety/safeguarding.js";
+import { detectSafeguarding, type SafeguardingHit } from "./safety/safeguarding.js";
 import { getToolCallsForItem, withItemContext } from "./tools.js";
 import type { InboxItem, ItemOutput } from "./types.js";
 
@@ -102,7 +102,7 @@ interface TriagePayload {
 
 async function runLlmPath(
   item: InboxItem,
-  safeguarding: { hit: boolean; matchedPhrase: string | null },
+  safeguarding: SafeguardingHit,
   dueDates: { sameDay: string; nearTerm: string },
 ): Promise<TriagePayload> {
   const client = getAnthropicClient();
@@ -146,18 +146,20 @@ async function runDeterministicPath(
  */
 async function forceSafeguardingOverride(
   item: InboxItem,
-  safeguarding: { hit: boolean; matchedPhrase: string | null },
+  safeguarding: SafeguardingHit,
   payload: TriagePayload,
 ): Promise<TriagePayload> {
+  const categoryTag = safeguarding.category ? ` [${safeguarding.category}]` : "";
+  const langTag = safeguarding.language ? ` [lang=${safeguarding.language}]` : "";
   return {
     ...payload,
     classification: "safeguarding",
     urgency: "P0",
     escalation: {
-      reason: `Deterministic safeguarding pre-filter matched "${safeguarding.matchedPhrase}" but the agent did not escalate. Forced P0 override; clinical lead to review immediately.`,
+      reason: `Deterministic safeguarding pre-filter matched${categoryTag}${langTag}: "${safeguarding.matchedPhrase}". The agent did not escalate. Forced P0 override; clinical lead to review immediately.`,
       severity: "P0",
     },
-    decision_rationale: `[OVERRIDE] ${payload.decision_rationale}\n\nSafety override: the deterministic safeguarding filter matched "${safeguarding.matchedPhrase}" in item ${item.id}. Per policy, this routes to P0 regardless of model judgment.`,
+    decision_rationale: `[OVERRIDE] ${payload.decision_rationale}\n\nSafety override: the deterministic safeguarding filter matched${categoryTag}${langTag} in item ${item.id} (phrase: "${safeguarding.matchedPhrase}"). Per policy, this routes to P0 regardless of model judgment.`,
   };
 }
 

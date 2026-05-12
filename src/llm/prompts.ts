@@ -72,7 +72,15 @@ export function buildUserMessage(
   dueDates: { sameDay: string; nearTerm: string },
 ): string {
   const safetyLine = safeguarding.hit
-    ? `\nSAFEGUARDING PRE-SCREEN: HIT. Deterministic regex matched the phrase "${safeguarding.matchedPhrase}". You MUST classify as safeguarding, urgency P0, and follow the safeguarding rule. Do not skip escalation.\n`
+    ? [
+        "",
+        "SAFEGUARDING PRE-SCREEN: HIT.",
+        `  Matched phrase: "${safeguarding.matchedPhrase}"`,
+        `  Category: ${safeguarding.category ?? "unspecified"}`,
+        `  Language: ${safeguarding.language ?? "unspecified"}`,
+        "  You MUST classify as safeguarding, urgency P0, and follow the safeguarding rule. Do not skip escalation.",
+        "",
+      ].join("\n")
     : "\nSAFEGUARDING PRE-SCREEN: no match.\n";
 
   return [
